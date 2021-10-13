@@ -1,0 +1,331 @@
+---
+title: "Stahování historických dat z Volby.cz"
+author: "Marek Prokop"
+date: "`r Sys.Date()`"
+output: 
+  html_notebook: 
+    code_folding: none
+    toc: yes
+    toc_depth: 4
+---
+
+# Úvod
+
+Je po parlamentních volbách 2021 a hodně lidí teď počítá z výsledků různé statistiky. Protože je docela zajímavé porovnat právě skončené volby s minulými (např. preferenční hlasy), stáhl jsem data všech historických voleb do PSP ČR do jednoho datasetu. Pokud chcete jen ten dataset, je ve složce *data.*
+
+Zároveň jsem ale zdokumentoval celý postup, jak jsem data stáhl. Udělal jsem to jednak proto, že by se to někomu mohlo hodit jako univerzální příklad získávání podobných dat z webu, a jednak proto, že to třeba nemám napsané úplně nejlépe a někdo mi doporučí lepší řešení, opraví chyby apod.
+
+Český statistický úřad publikuje data k volbám na webu [Volby.cz](https://www.volby.cz/) jednak v HTML na webových stránkách a jednak v XML. XML je na zpracování praktičtější, ale v tomto formátu nejsou zpracované všechny volby. Připravím tedy řešení jen pro formát HTML.
+
+# Balíčky a parametry
+
+Nejprve načtu balíčky, které budu potřebovat a definuji si URL úvodní stránky s rozcestníkem na volby a jejich roky.
+
+```{r libs}
+library(rvest, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(janitor, warn.conflicts = FALSE)
+library(memoise)
+```
+
+```{r params}
+topIndexHtmlUrl <- "https://volby.cz/"
+```
+
+
+# Hlavní index voleb a roků
+
+Na stránce `r topIndexHtmlUrl` je hlavní rozcestník na výsledky voleb ve formátu HTML. Jde o tabulku, která má v prvním sloupci název voleb a v druhém sloupci odkazy na hlavní stránky daných voleb v jednotlivých letech. Tabulka nemá žádné hlavičky, skládá se jen z prvků `tr`, `td` a `a`. Její CSS class je `home`.
+
+Tuto tabulku chci stáhnout do data framu se sloupci:
+
+- volby: název voleb
+- rok: číslo roku
+- url: URL hlavní stránky daných voleb pro daný rok
+
+## Postup
+
+I když chci stáhnout jen jednu tabulku, raději si na to napíšu funkci, kterou jde volat opakovaně s různým vstupním URL.
+
+Balíčkem *rvest* stáhnu úvodní stránku a z ní si uložím tabulku `home`. Parsování je trochu složitější, protože tabulka není moc dobře strukturovaná. Událám to funkcemi z balíčku *purrr* postupně po řádcích a roky z druhého sloupce uložím do seznamu (*list*). Ten pak rozdělím na dva sloupce funkcí *unest_wider* z balíčku *tidyr*.
+
+```{r getTopIndex}
+getTopIndex <- function(indexUrl) {
+  indexHtml <- indexUrl %>% 
+    read_html(encoding = "utf-8") %>% 
+    html_element("table.home")
+  
+  indexHtml %>% html_nodes("tr") %>% 
+    map_dfr(function(x) {
+      tds <- x %>% html_nodes("td")
+      electionName = tds[1] %>% html_text2()
+      tibble(
+        volby = electionName,
+        roky = tds[2] %>% html_elements("a") %>% 
+          map(function(y) {
+            list(
+              rok = y %>% html_text(),
+              url = y %>% html_attr("href") %>% url_absolute(indexUrl)
+            )
+          })
+      )
+    }) %>% 
+    unnest_wider(col = roky)
+}
+```
+
+## Výsledek
+
+Funkci aplikuji na URL indexu výsledků v HTML.
+
+```{r topIndexHtml}
+topIndexHtml <- getTopIndex(topIndexHtmlUrl)
+```
+
+A dostanu výsledek:
+
+```{r}
+topIndexHtml %>% glimpse()
+```
+
+
+Z takto vytvořeného data framu můžu vybírat konkrétní volby a všechny jejich roky. Teď mě např. zajímají volby do Poslanecké sněmovny PČR:
+
+```{r topIndexSample}
+topIndexHtml %>% 
+  filter(volby == "Poslanecká sněmovna Parlamentu ČR")
+```
+
+
+# Jmenné seznamy k volbám do Poslanecké sněmovny
+
+Chci stáhnout všechny jmenné seznamy ke všem volbám do Poslanecké sněmovny a uspořádat je do jednoho data framu, ve kterém budou řádky odpovídat jednotlivým kandidátům a sloupce všem údajům, které k nim alespoň v některém roce v datech jsou.
+
+Tento úkol komplikuje několik věcí:
+
+1. Finální data pro každý rok nejsou na jedné stránce. Je potřeba stáhnout data ze stánek za jednotlivé kraje, kterých je 14.
+1. Cesta ke stránce s daty kraje je od úvodní stránky docela dlouhá (4 až 5 kliků) a není vždy stejná. Konkrétně v roce 2017 má jeden kok navíc.
+1. Struktura tabulek s finálními daty není jednotná. Jak uvidíte později, v různých letech se používají celkem tři různé sady sloupců.
+
+## Postup
+
+Protože nechci data z webu během testování postupu příliš často opakovaně stahovat, všechny stahovací funkce ošetřím funkcí *memoise*, která na pozadí zajistí kešování výsledků. Opakované volání téže funkce se stejnými parametry tedy data reálně stahovat z webu, ale vezme je z keše.
+
+### Nalezení koncového URL
+
+Nejprve se potřebuju dostat na stránku, která už přímo odkazuje na tabulky se jmennými seznamy za jednotlivé kraje. To je např. takto stránka: https://www.volby.cz/pls/ps2021/ps11?xjazyk=CZ&xv=1&xt=1
+
+Cesta k ní jde popsat funkcí:
+
+```{r}
+navigateToAllCandidates <- function(year) {
+  topIndexHtml %>% 
+  filter(
+    volby == "Poslanecká sněmovna Parlamentu ČR",
+    rok == year
+  ) %>% 
+  pull(url) %>% 
+  session() %>% 
+  {if (year == "2017") session_follow_link(., css = "ul li a") else . } %>% 
+  session_follow_link("Jmenné seznamy") %>% 
+  session_follow_link(css = "table a")
+}
+m_navigateToAllCandidates <- memoise(navigateToAllCandidates)
+```
+
+Funkce funguje správně na všech letech včetně roku 2017, pro který je tam jeden přidaný krok:
+
+```{r}
+m_navigateToAllCandidates("2021")
+```
+
+```{r}
+m_navigateToAllCandidates("2017")
+```
+
+
+### Jmenné seznamy podle krajů
+
+Výše uvedeným postupem se dostanu na všechny stránky tohoto typu: https://www.volby.cz/pls/ps2021/ps11?xjazyk=CZ&xv=1&xt=1. Ty obsahují tabulku, která má v první řádku odkazy na jmenné seznamy jednotlivých krajů, což jsou ta data, která chci stahovat.
+
+#### Zjištění struktury
+
+Potíž je, že tahle data vypadají v různých letech různě. V roce 2021 takto: https://www.volby.cz/pls/ps2021/ps111?xjazyk=CZ&xkraj=1&xstrana=0&xv=1&xt=1, ale v např. roce 1996 takto: https://www.volby.cz/pls/ps1996/u321?xpl=0&xtr=1&xvstrana=00&xkraj=31.
+
+Proto si nejprve ověřím, kolik verzí vlastně je a jak struktura tabulky (tj. názvy sloupcú) v jednotlivých letech vypadá.
+
+```{r}
+getStructure <- function(year) {
+  tibble(
+    rok = year,
+    col_name = m_navigateToAllCandidates(year) %>% 
+      session_follow_link(css = "table a") %>% 
+      html_element("table") %>% 
+      html_table() %>% 
+      clean_names() %>% 
+      names()
+  ) %>% 
+    mutate(col_num = row_number(), .after = 1)
+}
+
+structure <- topIndexHtml %>% 
+  filter(volby == "Poslanecká sněmovna Parlamentu ČR") %>% 
+  pull(rok) %>% 
+  map_dfr(getStructure)
+```
+
+A rozdíly ve struktuře si přehledně zobrazím:
+
+```{r}
+structure %>% 
+  pivot_wider(names_from = col_num, values_from = col_name) %>% 
+  group_by(across(-rok)) %>% 
+  summarise(roky = str_c(rok, collapse = ", "), .groups = "drop") %>% 
+  relocate(roky, .before = 1)
+```
+
+Z výsledku je vidět, že tabulky osbahují maxmálně 12 sloupců a existují tři různé verze:
+
+1. pro roky 2006, 2010, 2013, 2017, 2021,
+1. pro roky 1996, 1998 a
+1. pro rok 2002
+
+Do finálních dat chci dostat těchto 11 sloupců:
+
+1) pořadové číslo strany: 1
+2) název strany: 2
+3) číslo kandidáta: 3
+4) jméno kandidáta: 2002: 4 + 5, ostatní: 4
+5) věk: 2002: 6, ostatní: 5
+6) navrhující strana: 2002: 7; 1996, 1998: NA; ostatní: 6
+7) politická příslušnost: 2002: 8; 1996, 1998: NA; ostatní: 7
+8) přednostní hlasy absolutně: 2002: 9; 1996, 1998: 6; ostatní: 8
+9) přednostní hlasy %: 2002: 10; 1996, 1998: 7; ostatní: 9
+10) mandát: 1996, 1998: 8; 2002: NA; ostatní: 10
+11) pořadí: 1996, 1998: 9; 2002: NA; ostatní: 11
+
+
+#### Načtení dat
+
+Zpracování jenoho roku a kraje voleb rozvětvím pro odlišnou strukturu v různých letech a bude vypadat takto:
+
+```{r}
+loadRegionData <- function(year, region, pageUrl) {
+  df <- read_html(pageUrl) %>% 
+    html_element("table") %>% 
+    html_table() %>% 
+    clean_names() %>% 
+    slice(-1)
+  
+  if (as.numeric(year) >= 2006) {
+    df <- df %>% 
+      transmute(
+        strana_cislo = as.integer(.[[1]]),
+        strana_nazev = .[[2]],
+        kandidat_cislo = as.integer(.[[3]]),
+        kandidat = .[[4]],
+        kandidat_vek = as.integer(.[[5]]),
+        navrhujici_strana = .[[6]],
+        prislusnost = .[[7]],
+        prednostni_hlasy_abs = as.numeric(str_replace_all(.[[8]], "[^0-9]", "")),
+        prednostni_hlasy_pct = as.numeric(str_replace(.[[9]], ",", ".")),
+        mandat = .[[10]],
+        poradi = as.integer(.[[11]])
+      )
+  } else if (as.numeric(year) == 2002) {
+    df <- df %>% 
+      transmute(
+        strana_cislo = as.integer(.[[1]]),
+        strana_nazev = .[[2]],
+        kandidat_cislo = as.integer(.[[3]]),
+        kandidat = paste(.[[4]], .[[5]]),
+        kandidat_vek = as.integer(.[[6]]),
+        navrhujici_strana = .[[7]],
+        prislusnost = .[[8]],
+        prednostni_hlasy_abs = as.numeric(str_replace_all(.[[9]], "[^0-9]", "")),
+        prednostni_hlasy_pct = as.numeric(str_replace(.[[10]], ",", ".")),
+        mandat = NA,
+        poradi = NA
+      )
+  } else { # roky 1996 a 1998
+    df <- df %>% 
+      transmute(
+        strana_cislo = as.integer(.[[1]]),
+        strana_nazev = .[[2]],
+        kandidat_cislo = as.integer(.[[3]]),
+        kandidat = .[[4]],
+        kandidat_vek = as.integer(.[[5]]),
+        navrhujici_strana = NA,
+        prislusnost = NA,
+        prednostni_hlasy_abs = as.numeric(str_replace_all(.[[6]], "[^0-9]", "")),
+        prednostni_hlasy_pct = as.numeric(str_replace(.[[7]], ",", ".")),
+        mandat = .[[8]],
+        poradi = as.integer(.[[9]])
+      )
+  }
+  
+  df %>% 
+    mutate(rok = year, kraj = region, .before = 1)
+}
+m_loadRegionData <- memoise(loadRegionData)
+
+m_loadRegionData("1996", "Hlavní město Praha", "https://www.volby.cz/pls/ps1996/u321?xpl=0&xtr=1&xvstrana=00&xkraj=31")
+```
+
+Zpracování všech regionů jedno celého roku bude vypadat takto:
+
+```{r}
+loadAllRegions <- function(year) {
+  page <- navigateToAllCandidates(year)
+  
+  regionUrls <- page %>% 
+    html_elements("table tr:nth-child(2) a") %>% 
+    html_attr("href") %>% 
+    url_absolute(page$url)
+
+  regionNames <- page %>% 
+    html_elements("table tr:nth-child(1) th") %>% 
+    html_text2() %>% 
+    str_replace_all(fixed("-\n"), "") %>% 
+    str_replace_all(fixed("\n"), " ") %>%
+    .[1:length(regionUrls) + 2]
+  
+  map2_dfr(.x = regionNames, .y = regionUrls, .f = ~ m_loadRegionData(year, .x, .y))
+
+}
+m_loadAllRegions <- memoise(loadAllRegions)
+
+m_loadAllRegions("2002")
+```
+
+A nyní konečně mohu načíst a zpracovat úplně všechna data.
+
+```{r}
+allData <- topIndexHtml %>% 
+  filter(volby == "Poslanecká sněmovna Parlamentu ČR") %>% 
+  pull(rok) %>% 
+  map_dfr(m_loadAllRegions)
+```
+
+```{r}
+allData
+```
+
+#### Kontrola dat
+
+Ještě pár kontrolami ověřím, zda jsou data pravděpodobně v pořádku načtená.
+
+```{r}
+allData %>% count(rok)
+allData %>% count(kraj)
+allData %>% count(strana_nazev)
+```
+
+#### Uložení dat do CSV
+
+Úplně nakonec uložím celý dataset do CSV souboru a je hoto.
+
+```{r}
+allData %>% write_csv("data/psp-all-data.csv")
+```
+
