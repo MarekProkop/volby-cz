@@ -2,11 +2,7 @@
 title: "Stahování historických dat z Volby.cz"
 author: "Marek Prokop"
 date: "`r Sys.Date()`"
-output: 
-  html_notebook: 
-    code_folding: none
-    toc: yes
-    toc_depth: 4
+output: github_document
 ---
 
 # Úvod
@@ -269,7 +265,8 @@ loadRegionData <- function(year, region, pageUrl) {
 }
 m_loadRegionData <- memoise(loadRegionData)
 
-m_loadRegionData("1996", "Hlavní město Praha", "https://www.volby.cz/pls/ps1996/u321?xpl=0&xtr=1&xvstrana=00&xkraj=31")
+m_loadRegionData("1996", "Hlavní město Praha", "https://www.volby.cz/pls/ps1996/u321?xpl=0&xtr=1&xvstrana=00&xkraj=31") %>% 
+  slice_head(n = 10)
 ```
 
 Zpracování všech regionů jedno celého roku bude vypadat takto:
@@ -295,7 +292,8 @@ loadAllRegions <- function(year) {
 }
 m_loadAllRegions <- memoise(loadAllRegions)
 
-m_loadAllRegions("2002")
+m_loadAllRegions("2002") %>% 
+  slice_sample(n = 10)
 ```
 
 A nyní konečně mohu načíst a zpracovat úplně všechna data.
@@ -308,7 +306,8 @@ allData <- topIndexHtml %>%
 ```
 
 ```{r}
-allData
+allData %>% 
+  slice_sample(n = 10)
 ```
 
 #### Kontrola dat
