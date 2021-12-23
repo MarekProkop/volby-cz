@@ -1,0 +1,60 @@
+---
+title: "Kroužkování"
+subtitle: "Porovná kroužkování dvou stran v určitém roce voleb do PSP"
+output: html_notebook
+---
+
+```{r libs}
+library(tidyverse)
+```
+
+```{r params}
+pspDataFileName <- "data/psp-all-data.csv"
+```
+
+```{r import}
+pspData <- read_csv(
+  file = pspDataFileName,
+  col_types = cols(
+    strana_cislo = col_integer(),
+    kandidat_cislo = col_integer(),
+    kandidat_vek = col_integer(),
+    navrhujici_strana = col_character(),
+    prislusnost = col_character(),
+    poradi = col_integer()
+  )
+)
+```
+
+```{r}
+pspData |> 
+  filter(
+    rok == "2021",
+    strana_nazev == "Piráti+STAN"
+  ) |> 
+  select(kandidat_cislo, navrhujici_strana, prednostni_hlasy_abs) |> 
+  ggplot(aes(x = kandidat_cislo, y = prednostni_hlasy_abs, fill = navrhujici_strana)) +
+  geom_col(position = "dodge")
+```
+
+```{r}
+pspData |> 
+  filter(
+    rok == "2021",
+    strana_nazev == "Piráti+STAN",
+    prednostni_hlasy_abs < 30000
+  ) |> 
+  ggplot(aes(x = kandidat_cislo, y = prednostni_hlasy_abs, fill = navrhujici_strana)) +
+  geom_col(position = "dodge")
+```
+```{r}
+pspData |> 
+  filter(
+    rok == "2021",
+    strana_nazev == "Piráti+STAN",
+    prednostni_hlasy_abs < 30000
+  ) |> 
+  ggplot(aes(x = kandidat_cislo, y = prednostni_hlasy_abs, color = navrhujici_strana)) +
+  geom_point()
+```
+

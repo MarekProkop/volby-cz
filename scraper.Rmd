@@ -265,7 +265,7 @@ loadRegionData <- function(year, region, pageUrl) {
 }
 m_loadRegionData <- memoise(loadRegionData)
 
-m_loadRegionData("1996", "Hlavní město Praha", "https://www.volby.cz/pls/ps1996/u321?xpl=0&xtr=1&xvstrana=00&xkraj=31") %>% 
+m_loadRegionData("2021", "Hlavní město Praha", "https://www.volby.cz/pls/ps2021/ps111?xjazyk=CZ&xkraj=1&xstrana=0&xv=1&xt=1") %>% 
   slice_head(n = 10)
 ```
 
@@ -292,7 +292,7 @@ loadAllRegions <- function(year) {
 }
 m_loadAllRegions <- memoise(loadAllRegions)
 
-m_loadAllRegions("2002") %>% 
+m_loadAllRegions("2021") %>% 
   slice_sample(n = 10)
 ```
 
